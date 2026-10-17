@@ -6,7 +6,7 @@ end
 
 local web = true
 local user = "proxylol" -- change if you're using a fork
-local branch = "revision"
+local branch = "main"
 local importCache = {}
 
 local function hasMethods(methods)
