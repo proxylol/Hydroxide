@@ -188,6 +188,7 @@ end
 useMethods(globalMethods)
 
 local HttpService = game:GetService("HttpService")
+local rawUrl = "https://raw.githubusercontent.com/%s/Hydroxide/%s/%s.lua"
 
 -- the releases API is rate limited; if it fails, fall back to the cached version so files aren't re-downloaded
 local releaseInfo do
@@ -199,129 +200,116 @@ local releaseInfo do
         releaseInfo = result
     else
         local cached = readFile and select(2, pcall(readFile, "__oh_version.txt"))
-        releaseInfo = { tag_name = (type(cached) == "string" and cached) or "unknown" }
+        releaseInfo = { tag_name = (type(cached) == "string" and cached ~= "" and cached) or "unknown" }
     end
 end
 
-if readFile and writeFile then
-    local hasFolderFunctions = (isFolder and makeFolder) ~= nil
-    local ran, result = pcall(readFile, "__oh_version.txt")
+local canCache = web and readFile and writeFile
+local hasFolderFunctions = (isFolder and makeFolder) ~= nil
+local cacheOutdated = true
 
-    if not ran or releaseInfo.tag_name ~= result then
-        if hasFolderFunctions then
-            local function createFolder(path)
-                if not isFolder(path) then
-                    makeFolder(path)
-                end
-            end
+if canCache then
+    local ran, version = pcall(readFile, "__oh_version.txt")
+    cacheOutdated = not (ran and version == releaseInfo.tag_name)
 
-            createFolder("hydroxide")
-            createFolder("hydroxide/user")
-            createFolder("hydroxide/user/" .. user)
-            createFolder("hydroxide/user/" .. user .. "/methods")
-            createFolder("hydroxide/user/" .. user .. "/modules")
-            createFolder("hydroxide/user/" .. user .. "/objects")
-            createFolder("hydroxide/user/" .. user .. "/ui")
-            createFolder("hydroxide/user/" .. user .. "/ui/controls")
-            createFolder("hydroxide/user/" .. user .. "/ui/modules")
-        end
+    if hasFolderFunctions then
+        for _i, path in ipairs({ "", "/methods", "/modules", "/objects", "/ui", "/ui/controls", "/ui/modules" }) do
+            local folder = "hydroxide/user/" .. user .. path
 
-        function environment.import(asset)
-            if importCache[asset] then
-                return unpack(importCache[asset])
-            end
-
-            local assets
-
-            if asset:find("rbxassetid://") then
-                assets = { game:GetObjects(asset)[1] }
-            elseif web then
-                if readFile and writeFile then
-                    local file = (hasFolderFunctions and "hydroxide/user/" .. user .. '/' .. asset .. ".lua") or ("hydroxide-" .. user .. '-' .. asset:gsub('/', '-') .. ".lua")
-                    local content
-
-                    if (isFile and not isFile(file)) or not importCache[asset] then
-                        content = game:HttpGetAsync("https://raw.githubusercontent.com/" .. user .. "/Hydroxide/" .. branch .. '/' .. asset .. ".lua")
-                        writeFile(file, content)
-                    else
-                        local ran, result = pcall(readFile, file)
-
-                        if (not ran) or not importCache[asset] then
-                            content = game:HttpGetAsync("https://raw.githubusercontent.com/" .. user .. "/Hydroxide/" .. branch .. '/' .. asset .. ".lua")
-                            writeFile(file, content)
-                        else
-                            content = result
-                        end
-                    end
-
-                    assets = { loadstring(content, asset .. '.lua')() }
-                else
-                    assets = { loadstring(game:HttpGetAsync("https://raw.githubusercontent.com/" .. user .. "/Hydroxide/" .. branch .. '/' .. asset .. ".lua"), asset .. '.lua')() }
-                end
-            else
-                assets = { loadstring(readFile("hydroxide/" .. asset .. ".lua"), asset .. '.lua')() }
-            end
-
-            importCache[asset] = assets
-            return unpack(assets)
-        end
-
-        writeFile("__oh_version.txt", releaseInfo.tag_name)
-    elseif ran and releaseInfo.tag_name == result then
-        function environment.import(asset)
-            if importCache[asset] then
-                return unpack(importCache[asset])
-            end
-
-            local assets
-
-            if asset:find("rbxassetid://") then
-                assets = { game:GetObjects(asset)[1] }
-            elseif web then
-                local file = (hasFolderFunctions and "hydroxide/user/" .. user .. '/' .. asset .. ".lua") or ("hydroxide-" .. user .. '-' .. asset:gsub('/', '-') .. ".lua")
-                local ran, result = pcall(readFile, file)
-                local content
-
-                if not ran then
-                    content = game:HttpGetAsync("https://raw.githubusercontent.com/" .. user .. "/Hydroxide/" .. branch .. '/' .. asset .. ".lua")
-                    writeFile(file, content)
-                else
-                    content = result
+            pcall(function()
+                if path == "" then
+                    if not isFolder("hydroxide") then makeFolder("hydroxide") end
+                    if not isFolder("hydroxide/user") then makeFolder("hydroxide/user") end
                 end
 
-                assets = { loadstring(content, asset .. '.lua')() }
-            else
-                assets = { loadstring(readFile("hydroxide/" .. asset .. ".lua"), asset .. '.lua')() }
-            end
-
-            importCache[asset] = assets
-            return unpack(assets)
+                if not isFolder(folder) then
+                    makeFolder(folder)
+                end
+            end)
         end
-
     end
-
-    useMethods({ import = environment.import })
-else
-    -- no file system access: always fetch from github and keep modules in memory only
-    function environment.import(asset)
-        if importCache[asset] then
-            return unpack(importCache[asset])
-        end
-
-        local assets
-
-        if asset:find("rbxassetid://") then
-            assets = { game:GetObjects(asset)[1] }
-        else
-            assets = { loadstring(game:HttpGetAsync("https://raw.githubusercontent.com/" .. user .. "/Hydroxide/" .. branch .. '/' .. asset .. ".lua"), asset .. '.lua')() }
-        end
-
-        importCache[asset] = assets
-        return unpack(assets)
-    end
-
-    useMethods({ import = environment.import })
 end
+
+local function cachePath(asset)
+    return (hasFolderFunctions and "hydroxide/user/" .. user .. '/' .. asset .. ".lua") or ("hydroxide-" .. user .. '-' .. asset:gsub('/', '-') .. ".lua")
+end
+
+local function download(asset)
+    local url = rawUrl:format(user, branch, asset)
+    local ran, content = pcall(game.HttpGetAsync, game, url)
+
+    if not ran or type(content) ~= "string" or content == "" or content:sub(1, 4) == "404:" then
+        error(("<OH> ~ couldn't download %s from %s: %s"):format(asset, url, tostring(content)), 0)
+    end
+
+    return content
+end
+
+-- returns the source for a module: the cached copy when it's current and non-empty, otherwise a fresh download
+local function getSource(asset)
+    if not web then
+        return readFile("hydroxide/" .. asset .. ".lua")
+    end
+
+    if canCache then
+        local file = cachePath(asset)
+
+        if not cacheOutdated then
+            local ran, content = pcall(readFile, file)
+
+            if ran and type(content) == "string" and content ~= "" then
+                return content
+            end
+        end
+
+        local content = download(asset)
+        pcall(writeFile, file, content)
+        return content
+    end
+
+    return download(asset)
+end
+
+function environment.import(asset)
+    if importCache[asset] then
+        return unpack(importCache[asset])
+    end
+
+    local assets
+
+    if asset:find("rbxassetid://") then
+        assets = { game:GetObjects(asset)[1] }
+    else
+        local source = getSource(asset)
+        local chunk, err = loadstring(source, asset .. '.lua')
+
+        if not chunk then
+            error(("<OH> ~ %s failed to compile: %s"):format(asset, tostring(err)), 0)
+        end
+
+        assets = { chunk() }
+
+        if #assets == 0 then
+            error(("<OH> ~ %s returned nothing. Delete the hydroxide folder and __oh_version.txt from your workspace and try again. Source starts with: %s"):format(asset, source:sub(1, 60)), 0)
+        end
+    end
+
+    importCache[asset] = assets
+    return unpack(assets)
+end
+
+useMethods({ import = environment.import })
+
+if canCache and cacheOutdated then
+    pcall(writeFile, "__oh_version.txt", releaseInfo.tag_name)
+end
+
+-- if the executor has its own global 'import', scripts may see it instead of ours
+if import ~= environment.import then
+    warn("<OH> ~ your executor's global 'import' is overriding Hydroxide's; modules may fail to load")
+end
+
+local import = environment.import
 
 useMethods(import("methods/string"))
 useMethods(import("methods/table"))
